@@ -246,6 +246,9 @@ DRMProperty DRMPropertyManager::GetPropertyEnum(const std::string &name) const {
   if (name == "SDE_SSPP_FP16_GC_V1") { return DRMProperty::SDE_SSPP_FP16_GC_V1; }
   if (name == "SDE_SSPP_FP16_CSC_V1") { return DRMProperty::SDE_SSPP_FP16_CSC_V1; }
   if (name == "SDE_SSPP_FP16_UNMULT_V1") { return DRMProperty::SDE_SSPP_FP16_UNMULT_V1; }
+#ifdef CONNECTOR_PROP_UDFPS
+  if (name == "fingerprint_mask" || name == "hbm_enable") { return DRMProperty::FINGERPRINT_MASK; }
+#endif
   if (name == "SDE_SSPP_UCSC_UNMULT_V1") { return DRMProperty::SDE_SSPP_UCSC_UNMULT_V1; }
   if (name == "SDE_SSPP_UCSC_IGC_V1") { return DRMProperty::SDE_SSPP_UCSC_IGC_V1; }
   if (name == "SDE_SSPP_UCSC_CSC_V1") { return DRMProperty::SDE_SSPP_UCSC_CSC_V1; }
