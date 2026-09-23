@@ -355,6 +355,17 @@ class HWDeviceDRM : public HWInterface {
   sde_drm::DRMAtomicReqInterface *drm_atomic_intf_ = {};
   std::vector<HWDisplayAttributes> display_attributes_ = {};
   uint32_t current_mode_index_ = 0;
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  bool has_reserved_aod_mode_ = false;
+  uint32_t reserved_aod_mode_index_ = UINT32_MAX;
+  bool reserved_aod_mode_active_ = false;
+  bool pending_reserved_aod_mode_active_ = false;
+  bool reserved_aod_mode_update_pending_ = false;
+  DRMPowerMode pending_commit_power_mode_ = DRMPowerMode::OFF;
+  bool power_mode_update_pending_ = false;
+  uint32_t pending_fingerprint_mask_state_ = 0;
+  bool fingerprint_mask_update_pending_ = false;
+#endif
   sde_drm::DRMConnectorInfo connector_info_ = {};
   bool first_cycle_ = true;
   bool first_null_cycle_ = true;

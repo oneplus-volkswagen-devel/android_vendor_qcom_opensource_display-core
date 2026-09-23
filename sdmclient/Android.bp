@@ -1,6 +1,9 @@
 cc_library_shared {
     name: "libsdmclient",
-    defaults: ["qtidisplay_defaults"],
+    defaults: [
+        "qtidisplay_defaults",
+        "qtidisplay_reserve_30hz_aod_defaults",
+    ],
     sanitize: {
         integer_overflow: true,
     },

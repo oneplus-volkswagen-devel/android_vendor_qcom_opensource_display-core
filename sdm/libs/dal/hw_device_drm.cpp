@@ -886,6 +886,19 @@ void HWDeviceDRM::InitializeConfigs() {
         break;
       }
   }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (connector_info_.panel_name == "AA610 P 3 A0034 dsc video mode panel") {
+    for (uint32_t mode_index = 0; mode_index < connector_info_.modes.size(); mode_index++) {
+      if (connector_info_.modes[mode_index].mode.vrefresh == 30) {
+        has_reserved_aod_mode_ = true;
+        reserved_aod_mode_index_ = mode_index;
+        DLOGI("Reserved display %d-%d mode %d for 30 Hz AOD", display_id_, disp_type_,
+              mode_index);
+        break;
+      }
+    }
+  }
+#endif
 
   display_attributes_.resize(connector_info_.modes.size());
 
@@ -1065,6 +1078,11 @@ void HWDeviceDRM::PopulateHWPanelInfo() {
     uint32_t min_fps = current_mode.vrefresh;
     uint32_t max_fps = current_mode.vrefresh;
     for (uint32_t mode_index = 0; mode_index < connector_info_.modes.size(); mode_index++) {
+#ifdef OPLUS_RESERVE_30HZ_AOD
+      if (has_reserved_aod_mode_ && mode_index == reserved_aod_mode_index_) {
+        continue;
+      }
+#endif
       if ((current_mode.vdisplay == connector_info_.modes[mode_index].mode.vdisplay) &&
           (current_mode.hdisplay == connector_info_.modes[mode_index].mode.hdisplay)) {
         if (min_fps > connector_info_.modes[mode_index].mode.vrefresh)  {
@@ -1346,6 +1364,12 @@ DisplayError HWDeviceDRM::SetDisplayAttributes(uint32_t index) {
     DLOGE("Invalid mode index %d mode size %d", index, UINT32(display_attributes_.size()));
     return kErrorParameters;
   }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (has_reserved_aod_mode_ && index == reserved_aod_mode_index_) {
+    DLOGE("Mode index %d is reserved for AOD", index);
+    return kErrorNotSupported;
+  }
+#endif
 
   SetDisplaySwitchMode(index);
   PopulateHWPanelInfo();
@@ -1391,6 +1415,14 @@ DisplayError HWDeviceDRM::PowerOn(const HWQosData &qos_data, SyncPoints *sync_po
   int64_t retire_fence_fd = -1;
 
   drm_atomic_intf_->Perform(DRMOps::CRTC_SET_ACTIVE, token_.crtc_id, 1);
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (has_reserved_aod_mode_) {
+    sde_drm::DRMModeInfo normal_mode = connector_info_.modes[current_mode_index_];
+    drm_atomic_intf_->Perform(DRMOps::CRTC_SET_MODE, token_.crtc_id, &normal_mode.mode);
+    drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_DSC_MODE, token_.conn_id,
+                              normal_mode.curr_compression_mode);
+  }
+#endif
   drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_POWER_MODE, token_.conn_id, DRMPowerMode::ON);
   drm_atomic_intf_->Perform(DRMOps::CRTC_GET_RELEASE_FENCE, token_.crtc_id, &release_fence_fd);
   drm_atomic_intf_->Perform(DRMOps::CONNECTOR_GET_RETIRE_FENCE, token_.conn_id, &retire_fence_fd);
@@ -1414,9 +1446,19 @@ DisplayError HWDeviceDRM::PowerOn(const HWQosData &qos_data, SyncPoints *sync_po
   }
   int ret = NullCommit(is_synchronous, true /* retain_planes */);
   if (ret) {
+#ifdef OPLUS_RESERVE_30HZ_AOD
+    if (has_reserved_aod_mode_) {
+      pending_power_state_ = kPowerStateOn;
+    }
+#endif
     DLOGE("Failed with error: %d", ret);
     return kErrorHardware;
   }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (has_reserved_aod_mode_) {
+    reserved_aod_mode_active_ = false;
+  }
+#endif
 
   sync_points->retire_fence = Fence::Create(INT(retire_fence_fd), "retire_power_on");
   sync_points->release_fence = Fence::Create(INT(release_fence_fd), "release_power_on");
@@ -1455,6 +1497,14 @@ DisplayError HWDeviceDRM::PowerOff(bool teardown, SyncPoints *sync_points) {
             display_id_, current_mask_state_);
     }
   }
+#endif
+#ifdef OPLUS_RESERVE_30HZ_AOD
+#ifdef OPLUS_FINGERPRINT_MASK
+  bool clear_reserved_fingerprint_mask = has_reserved_aod_mode_ && current_mask_state_;
+  if (clear_reserved_fingerprint_mask) {
+    drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_FINGERPRINT_MASK, token_.conn_id, 0);
+  }
+#endif
 #endif
 
   ResetROI();
@@ -1515,6 +1565,16 @@ DisplayError HWDeviceDRM::PowerOff(bool teardown, SyncPoints *sync_points) {
   sync_points->retire_fence = Fence::Create(INT(retire_fence_fd), "retire_power_off");
   pending_power_state_ = kPowerStateNone;
 
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (has_reserved_aod_mode_) {
+    reserved_aod_mode_active_ = false;
+  }
+#ifdef OPLUS_FINGERPRINT_MASK
+  if (clear_reserved_fingerprint_mask) {
+    current_mask_state_ = 0;
+  }
+#endif
+#endif
   last_power_mode_ = DRMPowerMode::OFF;
 
   return kErrorNone;
@@ -1534,8 +1594,30 @@ DisplayError HWDeviceDRM::Doze(const HWQosData &qos_data, SyncPoints *sync_point
   int64_t retire_fence_fd = -1;
 
   drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_CRTC, token_.conn_id, token_.crtc_id);
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  bool doze_reserved_mode = has_reserved_aod_mode_;
+#ifdef OPLUS_FINGERPRINT_MASK
+  doze_reserved_mode = doze_reserved_mode &&
+                       !(current_mask_state_ & OPLUS_OFP_PROPERTY_FINGERPRESS_LAYER);
+#endif
+  drmModeModeInfo current_mode = doze_reserved_mode
+                                    ? connector_info_.modes[reserved_aod_mode_index_].mode
+                                    : connector_info_.modes[current_mode_index_].mode;
+#else
   drmModeModeInfo current_mode = connector_info_.modes[current_mode_index_].mode;
+#endif
   drm_atomic_intf_->Perform(DRMOps::CRTC_SET_MODE, token_.crtc_id, &current_mode);
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (doze_reserved_mode) {
+    drm_atomic_intf_->Perform(
+        DRMOps::CONNECTOR_SET_DSC_MODE, token_.conn_id,
+        connector_info_.modes[reserved_aod_mode_index_].curr_compression_mode);
+  } else if (has_reserved_aod_mode_) {
+    drm_atomic_intf_->Perform(
+        DRMOps::CONNECTOR_SET_DSC_MODE, token_.conn_id,
+        connector_info_.modes[current_mode_index_].curr_compression_mode);
+  }
+#endif
 
   drm_atomic_intf_->Perform(DRMOps::CRTC_SET_ACTIVE, token_.crtc_id, 1);
   drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_POWER_MODE, token_.conn_id, DRMPowerMode::DOZE);
@@ -1554,9 +1636,19 @@ DisplayError HWDeviceDRM::Doze(const HWQosData &qos_data, SyncPoints *sync_point
   }
   int ret = NullCommit(is_synchronous, true /* retain_planes */);
   if (ret) {
+#ifdef OPLUS_RESERVE_30HZ_AOD
+    if (has_reserved_aod_mode_) {
+      pending_power_state_ = kPowerStateDoze;
+    }
+#endif
     DLOGE("Failed with error: %d", ret);
     return kErrorHardware;
   }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (has_reserved_aod_mode_) {
+    reserved_aod_mode_active_ = doze_reserved_mode;
+  }
+#endif
 
   sync_points->retire_fence = Fence::Create(INT(retire_fence_fd), "retire_doze");
   sync_points->release_fence = Fence::Create(release_fence_fd, "release_doze");
@@ -1581,11 +1673,45 @@ DisplayError HWDeviceDRM::DozeSuspend(const HWQosData &qos_data, SyncPoints *syn
   int64_t release_fence_fd = -1;
   int64_t retire_fence_fd = -1;
 
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  bool doze_suspend_reserved_mode = has_reserved_aod_mode_;
+#ifdef OPLUS_FINGERPRINT_MASK
+  doze_suspend_reserved_mode = doze_suspend_reserved_mode &&
+                               !(current_mask_state_ & OPLUS_OFP_PROPERTY_FINGERPRESS_LAYER);
+#endif
+#endif
   if (first_cycle_) {
     drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_CRTC, token_.conn_id, token_.crtc_id);
+#ifdef OPLUS_RESERVE_30HZ_AOD
+    drmModeModeInfo current_mode = doze_suspend_reserved_mode
+                                      ? connector_info_.modes[reserved_aod_mode_index_].mode
+                                      : connector_info_.modes[current_mode_index_].mode;
+#else
     drmModeModeInfo current_mode = connector_info_.modes[current_mode_index_].mode;
+#endif
     drm_atomic_intf_->Perform(DRMOps::CRTC_SET_MODE, token_.crtc_id, &current_mode);
+#ifdef OPLUS_RESERVE_30HZ_AOD
+    if (doze_suspend_reserved_mode) {
+      drm_atomic_intf_->Perform(
+          DRMOps::CONNECTOR_SET_DSC_MODE, token_.conn_id,
+          connector_info_.modes[reserved_aod_mode_index_].curr_compression_mode);
+    } else if (has_reserved_aod_mode_) {
+      drm_atomic_intf_->Perform(
+          DRMOps::CONNECTOR_SET_DSC_MODE, token_.conn_id,
+          connector_info_.modes[current_mode_index_].curr_compression_mode);
+    }
+#endif
   }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (has_reserved_aod_mode_ && !first_cycle_) {
+    uint32_t mode_index = doze_suspend_reserved_mode ? reserved_aod_mode_index_
+                                                     : current_mode_index_;
+    sde_drm::DRMModeInfo mode = connector_info_.modes[mode_index];
+    drm_atomic_intf_->Perform(DRMOps::CRTC_SET_MODE, token_.crtc_id, &mode.mode);
+    drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_DSC_MODE, token_.conn_id,
+                              mode.curr_compression_mode);
+  }
+#endif
   if (enable_brightness_drm_prop_ && cached_brightness_level_ != -1) {
     drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_BRIGHTNESS, token_.conn_id,
                               cached_brightness_level_);
@@ -1604,9 +1730,19 @@ DisplayError HWDeviceDRM::DozeSuspend(const HWQosData &qos_data, SyncPoints *syn
   }
   int ret = NullCommit(is_synchronous, true /* retain_planes */);
   if (ret) {
+#ifdef OPLUS_RESERVE_30HZ_AOD
+    if (has_reserved_aod_mode_) {
+      pending_power_state_ = kPowerStateDozeSuspend;
+    }
+#endif
     DLOGE("Failed with error: %d", ret);
     return kErrorHardware;
   }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (has_reserved_aod_mode_) {
+    reserved_aod_mode_active_ = doze_suspend_reserved_mode;
+  }
+#endif
 
   sync_points->retire_fence = Fence::Create(INT(retire_fence_fd), "retire_doze_suspend");
   sync_points->release_fence = Fence::Create(release_fence_fd, "release_doze_suspend");
@@ -1656,6 +1792,10 @@ void HWDeviceDRM::SetupAtomic(Fence::ScopedRef &scoped_ref, HWLayersInfo *hw_lay
   DRMSecurityLevel crtc_security_level = DRMSecurityLevel::SECURE_NON_SECURE;
   uint32_t index = current_mode_index_;
   sde_drm::DRMModeInfo current_mode = connector_info_.modes[index];
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  uint32_t target_mode_index = index;
+  bool fingerprint_pressed = false;
+#endif
 
   solid_fills_.clear();
   noise_cfg_ = {};
@@ -1680,10 +1820,28 @@ void HWDeviceDRM::SetupAtomic(Fence::ScopedRef &scoped_ref, HWLayersInfo *hw_lay
         mask_state |= OPLUS_OFP_PROPERTY_FINGERPRESS_LAYER;
       }
     }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+    fingerprint_pressed = (mask_state & OPLUS_OFP_PROPERTY_FINGERPRESS_LAYER);
+#endif
 
     if (current_mask_state_ != mask_state) {
+#ifdef OPLUS_RESERVE_30HZ_AOD
+      if (has_reserved_aod_mode_) {
+        drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_FINGERPRINT_MASK, token_.conn_id,
+                                  mask_state);
+        if (!validate) {
+          pending_fingerprint_mask_state_ = mask_state;
+          fingerprint_mask_update_pending_ = true;
+        }
+      } else {
+        current_mask_state_ = mask_state;
+        drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_FINGERPRINT_MASK, token_.conn_id,
+                                  mask_state);
+      }
+#else
       current_mask_state_ = mask_state;
       drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_FINGERPRINT_MASK, token_.conn_id, mask_state);
+#endif
     }
   }
 #endif
@@ -2145,6 +2303,9 @@ void HWDeviceDRM::SetupAtomic(Fence::ScopedRef &scoped_ref, HWLayersInfo *hw_lay
           (current_mode.cur_panel_mode == connector_info_.modes[mode_index].cur_panel_mode) &&
           (vrefresh_ == connector_info_.modes[mode_index].mode.vrefresh)) {
         current_mode = connector_info_.modes[mode_index];
+#ifdef OPLUS_RESERVE_30HZ_AOD
+        target_mode_index = mode_index;
+#endif
         break;
       }
     }
@@ -2171,24 +2332,85 @@ void HWDeviceDRM::SetupAtomic(Fence::ScopedRef &scoped_ref, HWLayersInfo *hw_lay
                               topology_control_);
     drm_atomic_intf_->Perform(DRMOps::CRTC_SET_ACTIVE, token_.crtc_id, 1);
     drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_CRTC, token_.conn_id, token_.crtc_id);
+#ifdef OPLUS_RESERVE_30HZ_AOD
+    DRMPowerMode power_mode = DRMPowerMode::ON;
+    if (has_reserved_aod_mode_ && pending_power_state_ != kPowerStateNone) {
+      GetDRMPowerMode(pending_power_state_, &power_mode);
+    }
+    drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_POWER_MODE, token_.conn_id, power_mode);
+    if (has_reserved_aod_mode_ && !validate) {
+      pending_commit_power_mode_ = power_mode;
+      power_mode_update_pending_ = true;
+    } else if (!has_reserved_aod_mode_) {
+      last_power_mode_ = DRMPowerMode::ON;
+    }
+#else
     drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_POWER_MODE, token_.conn_id, DRMPowerMode::ON);
+#endif
 #ifdef TRUSTED_VM
     drm_atomic_intf_->Perform(sde_drm::DRMOps::CRTC_SET_VM_REQ_STATE, token_.crtc_id,
                               sde_drm::DRMVMRequestState::ACQUIRE);
 #endif
+#ifndef OPLUS_RESERVE_30HZ_AOD
     last_power_mode_ = DRMPowerMode::ON;
+#endif
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  } else if (pending_power_state_ != kPowerStateNone && (!validate || has_reserved_aod_mode_)) {
+#else
   } else if (pending_power_state_ != kPowerStateNone && !validate) {
+#endif
     DRMPowerMode power_mode;
     drm_atomic_intf_->Perform(DRMOps::CRTC_SET_ACTIVE, token_.crtc_id, 1);
     if (GetDRMPowerMode(pending_power_state_, &power_mode) == kErrorNone) {
       drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_POWER_MODE, token_.conn_id, power_mode);
       active_state_toggled =
           ((last_power_mode_ == DRMPowerMode::OFF) && (power_mode != DRMPowerMode::OFF));
+#ifdef OPLUS_RESERVE_30HZ_AOD
+      if (has_reserved_aod_mode_) {
+        if (!validate) {
+          pending_commit_power_mode_ = power_mode;
+          power_mode_update_pending_ = true;
+        }
+      } else {
+        last_power_mode_ = power_mode;
+      }
+#else
       last_power_mode_ = power_mode;
+#endif
     }
   }
 
   // Set CRTC mode, only if display config changes
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (has_reserved_aod_mode_) {
+    DRMPowerMode effective_power_mode = last_power_mode_;
+    if (pending_power_state_ != kPowerStateNone) {
+      GetDRMPowerMode(pending_power_state_, &effective_power_mode);
+    } else if (first_cycle_) {
+      effective_power_mode = DRMPowerMode::ON;
+    }
+    bool target_doze = effective_power_mode == DRMPowerMode::DOZE ||
+                       effective_power_mode == DRMPowerMode::DOZE_SUSPEND;
+    if (target_doze && !fingerprint_pressed) {
+      target_mode_index = reserved_aod_mode_index_;
+      current_mode = connector_info_.modes[target_mode_index];
+    }
+
+    bool mode_state_changed = reserved_aod_mode_active_ !=
+                              (target_mode_index == reserved_aod_mode_index_);
+    if (first_cycle_ || pending_power_state_ != kPowerStateNone || mode_state_changed ||
+        vrefresh_ || update_mode_) {
+      drm_atomic_intf_->Perform(DRMOps::CRTC_SET_MODE, token_.crtc_id, &current_mode.mode);
+      drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_DSC_MODE, token_.conn_id,
+                                current_mode.curr_compression_mode);
+      if (!validate) {
+        pending_reserved_aod_mode_active_ = target_mode_index == reserved_aod_mode_index_;
+        reserved_aod_mode_update_pending_ = true;
+      }
+      update_mode_ = false;
+    }
+  } else
+#endif
   if (first_cycle_ || (!active_state_toggled && (vrefresh_ || update_mode_))) {
     drm_atomic_intf_->Perform(DRMOps::CRTC_SET_MODE, token_.crtc_id, &current_mode.mode);
     drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_DSC_MODE, token_.conn_id,
@@ -2412,6 +2634,11 @@ DisplayError HWDeviceDRM::AtomicCommit(HWLayersInfo *hw_layers_info) {
   if (ret) {
     DLOGE("%s failed with error %d crtc %d", __FUNCTION__, ret, token_.crtc_id);
     DumpHWLayers(hw_layers_info);
+#ifdef OPLUS_RESERVE_30HZ_AOD
+    reserved_aod_mode_update_pending_ = false;
+    power_mode_update_pending_ = false;
+    fingerprint_mask_update_pending_ = false;
+#endif
     vrefresh_ = 0;
     panel_mode_changed_ = 0;
     seamless_mode_switch_ = false;
@@ -2419,6 +2646,22 @@ DisplayError HWDeviceDRM::AtomicCommit(HWLayersInfo *hw_layers_info) {
     transfer_time_updated_ = 0;
     return kErrorHardware;
   }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (reserved_aod_mode_update_pending_) {
+    reserved_aod_mode_active_ = pending_reserved_aod_mode_active_;
+    reserved_aod_mode_update_pending_ = false;
+  }
+  if (power_mode_update_pending_) {
+    last_power_mode_ = pending_commit_power_mode_;
+    power_mode_update_pending_ = false;
+  }
+#ifdef OPLUS_FINGERPRINT_MASK
+  if (fingerprint_mask_update_pending_) {
+    current_mask_state_ = pending_fingerprint_mask_state_;
+    fingerprint_mask_update_pending_ = false;
+  }
+#endif
+#endif
 
   DLOGD_IF(kTagDriverConfig, "RELEASE fence: fd: %s", Fence::GetStr(release_fence).c_str());
   DLOGD_IF(kTagDriverConfig, "RETIRE fence: fd: %s", Fence::GetStr(retire_fence).c_str());
@@ -2825,6 +3068,13 @@ DisplayError HWDeviceDRM::SetRefreshRate(uint32_t refresh_rate) {
     // Defer any refresh rate setting.
     return kErrorNotSupported;
   }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (has_reserved_aod_mode_ &&
+      refresh_rate == connector_info_.modes[reserved_aod_mode_index_].mode.vrefresh) {
+    DLOGW("Refresh rate %d is reserved for AOD", refresh_rate);
+    return kErrorNotSupported;
+  }
+#endif
 
   // Check if requested refresh rate is valid
   sde_drm::DRMModeInfo current_mode = connector_info_.modes[current_mode_index_];

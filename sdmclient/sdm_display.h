@@ -652,6 +652,11 @@ public:
   bool skip_commit_ = false;
   std::map<uint32_t, DisplayConfigVariableInfo> variable_config_map_;
   std::vector<uint32_t> sdm_config_map_;
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  bool reserve_30hz_aod_ = false;
+  Config reserved_aod_config_index_ = UINT_MAX;
+  Config reserved_aod_fallback_config_index_ = 0;
+#endif
   bool client_connected_ = true;
   bool pending_config_ = false;
   bool has_client_composition_ = false;

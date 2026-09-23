@@ -690,7 +690,12 @@ void SDMDisplay::PopulateSDMExtendedDisplayResolution() {
   }
   extended_display_resolutions = final_extended_display_resolutions;
 
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  uint32_t config_index = reserve_30hz_aod_ ? UINT32(sdm_config_map_.size())
+                                             : UINT32(variable_config_map_.size());
+#else
   uint32_t config_index = variable_config_map_.size();
+#endif
 
   // pop the extra config pushed for POMS support to make it equal to the variable_config
   if (is_poms_mode_) {
@@ -730,10 +735,28 @@ void SDMDisplay::UpdateConfigs() {
 
   // For each config store the corresponding index which client understands.
   sdm_config_map_.resize(num_configs_);
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  PanelFeatureInfo panel_info = {};
+  if (display_intf_->GetPanelFeatureInfo(&panel_info) == kErrorNone &&
+      panel_info.panel_name == "AA610 P 3 A0034 dsc video mode panel") {
+    reserve_30hz_aod_ = true;
+  }
+  bool fallback_config_found = false;
+#endif
 
   for (uint32_t i = 0; i < num_configs_; i++) {
     DisplayConfigVariableInfo info = {};
     GetDisplayAttributesForConfig(INT(i), &info);
+#ifdef OPLUS_RESERVE_30HZ_AOD
+    if (reserve_30hz_aod_ && info.fps == 30) {
+      reserved_aod_config_index_ = i;
+      continue;
+    }
+    if (reserve_30hz_aod_ && !fallback_config_found) {
+      reserved_aod_fallback_config_index_ = i;
+      fallback_config_found = true;
+    }
+#endif
     bool config_exists = false;
     for (auto &config : variable_config_map_) {
       if (config.second == info) {
@@ -749,6 +772,12 @@ void SDMDisplay::UpdateConfigs() {
       sdm_config_map_.at(i) = i;
     }
   }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (reserved_aod_config_index_ != UINT_MAX && fallback_config_found) {
+    sdm_config_map_.at(reserved_aod_config_index_) =
+        sdm_config_map_.at(reserved_aod_fallback_config_index_);
+  }
+#endif
 
   if (NeedsSDMExtendedResolution()) {
     PopulateSDMExtendedDisplayResolution();
@@ -4077,6 +4106,11 @@ DisplayError SDMDisplay::GetSDMActiveConfig(bool get_real_config, Config *config
   if (error != kErrorNone) {
     return error;
   }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (reserve_30hz_aod_ && real_config == reserved_aod_config_index_) {
+    real_config = reserved_aod_fallback_config_index_;
+  }
+#endif
   *config_index = real_config;
 
   if (get_real_config) {

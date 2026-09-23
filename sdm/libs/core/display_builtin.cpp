@@ -1873,6 +1873,12 @@ DisplayError DisplayBuiltIn::SetRefreshRate(uint32_t refresh_rate, bool final_ra
       disable_dyn_fps_) {
     return kErrorNotSupported;
   }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (refresh_rate == 30 && std::string(client_ctx_.hw_panel_info.panel_name) ==
+                                "AA610 P 3 A0034 dsc video mode panel") {
+    return kErrorNotSupported;
+  }
+#endif
 
   if (refresh_rate < client_ctx_.hw_panel_info.min_fps ||
       refresh_rate > client_ctx_.hw_panel_info.max_fps) {
@@ -3822,6 +3828,12 @@ DisplayError DisplayBuiltIn::ChangeFps() {
       !enable_qsync_idle_) {
     refresh_rate = client_ctx_.hw_panel_info.min_fps;
   }
+#ifdef OPLUS_RESERVE_30HZ_AOD
+  if (refresh_rate == 30 && std::string(client_ctx_.hw_panel_info.panel_name) ==
+                                "AA610 P 3 A0034 dsc video mode panel") {
+    return kErrorNotSupported;
+  }
+#endif
 
   if (current_refresh_rate_ != refresh_rate) {
     DisplayError error = dpu_core_mux_->SetRefreshRate(refresh_rate);
